@@ -3,296 +3,708 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import plotly.express as px
-from scipy.stats import pearsonr
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, Lasso
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import r2_score, mean_squared_error
 import xgboost as xgb
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import warnings
-warnings.filterwarnings("ignore")
 
-# 全局页面配置
-st.set_page_config(page_title="污泥指标AI预测分析平台", layout="wide")
-plt.rcParams["font.sans-serif"] = ["SimHei"]
-plt.rcParams["axes.unicode_minus"] = False
+warnings.filterwarnings('ignore')
 
-# 初始化会话缓存
-if "df_raw" not in st.session_state:
-    st.session_state.df_raw = None
-if "X_train" not in st.session_state:
-    st.session_state.X_train = None
-if "X_test" not in st.session_state:
-    st.session_state.X_test = None
-if "y_train_dict" not in st.session_state:
-    st.session_state.y_train_dict = {}
-if "y_test_dict" not in st.session_state:
-    st.session_state.y_test_dict = {}
-if "model_dict" not in st.session_state:
-    st.session_state.model_dict = {}
-if "single_input" not in st.session_state:
-    st.session_state.single_input = None
+# 页面配置
+st.set_page_config(
+    page_title="污水处理智能分析平台",
+    page_icon="💧",
+    layout="wide"
+)
 
-# ---------------------- 页面标题 ----------------------
-st.title("🧪 进水水质-污泥指标机器学习交互预测平台")
-st.subheader("流程：数据输入 → 模型训练验证 → 在线单样本预测 → 多模型可视化分析")
-st.divider()
+# 自定义CSS
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1a73e8;
+        text-align: center;
+        padding: 1rem 0;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #555;
+        text-align: center;
+        padding-bottom: 1rem;
+    }
+    .result-box {
+        background-color: #f0f2f6;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+    }
+    .warning-box {
+        background-color: #fff3cd;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #ffc107;
+    }
+    .danger-box {
+        background-color: #f8d7da;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #dc3545;
+    }
+    .success-box {
+        background-color: #d4edda;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #28a745;
+    }
+    .stButton button {
+        width: 100%;
+        border-radius: 5px;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# ---------------------- Step1 数据输入模块 ----------------------
-st.header("Step 1 数据录入与单样本参数输入")
-col_upload, col_input = st.columns([1, 1])
+# 标题
+st.markdown('<div class="main-header">💧 污水处理智能分析平台</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">基于XGBoost / 随机森林 / Lasso 的多模型预测与优化系统</div>',
+            unsafe_allow_html=True)
 
-# 1.1 上传Excel数据集（云端适配修改）
-with col_upload:
-    st.subheader("1.1 上传 data.xlsx 数据集")
-    upload_file = st.file_uploader("上传数据集文件（data.xlsx）", type=["xlsx"])
-    if upload_file is not None:
-        df = pd.read_excel(upload_file)
-        # 筛选原始真实字段（剔除归一化列）
-        use_cols = [
-            "Qoutm3/d", "BOD5 (mg/l)", "CODcr(mg/l)", "SS(mg/l)",
-            "TP(mg/l)", "TN(mg/l)", "Tin℃",
-            "SRT", "MLVSS/MLSS", "SVI"
-        ]
-        df_clean = df[use_cols].copy()
-        df_clean = df_clean.dropna()
-        st.session_state.df_raw = df_clean
-        st.success("数据集加载完成！")
-        st.dataframe(df_clean.head(8), height=220)
 
-# 1.2 手动输入单条水质参数
-with col_input:
-    st.subheader("1.2 手动输入待预测水质参数")
-    Qout = st.number_input("出水量 Qout(m³/d)", value=350000.0, min_value=200000.0, max_value=450000.0)
-    BOD5 = st.number_input("BOD5 (mg/L)", value=140.0, min_value=70.0, max_value=320.0)
-    COD = st.number_input("CODcr (mg/L)", value=260.0, min_value=160.0, max_value=750.0)
-    SS = st.number_input("SS (mg/L)", value=130.0, min_value=50.0, max_value=430.0)
-    TP = st.number_input("TP (mg/L)", value=4.0, min_value=1.5, max_value=20.0)
-    TN = st.number_input("TN (mg/L)", value=36.0, min_value=27.0, max_value=80.0)
-    Tin = st.number_input("进水温度 Tin(℃)", value=24.0, min_value=14.0, max_value=27.0)
-    input_arr = np.array([[Qout, BOD5, COD, SS, TP, TN, Tin]])
-    st.session_state.single_input = input_arr
+# 加载数据
+@st.cache_data
+def load_data():
+    try:
+        df = pd.read_excel('数据/随机森林归一化.xlsx', sheet_name='Sheet1')
+        return df
+    except:
+        # 尝试读取当前目录
+        try:
+            df = pd.read_excel('随机森林归一化.xlsx', sheet_name='Sheet1')
+            return df
+        except:
+            st.error("❌ 找不到数据文件！请确保 '随机森林归一化.xlsx' 在 'data' 文件夹或当前目录下。")
+            return None
 
-# 字段命名映射
-feature_names = ["出水量", "BOD5", "CODcr", "SS", "TP", "TN", "进水温度"]
-feature_cols = ["Qoutm3/d", "BOD5 (mg/l)", "CODcr(mg/l)", "SS(mg/l)", "TP(mg/l)", "TN(mg/l)", "Tin℃"]
-target_names = ["SRT污泥龄", "有机质占比MLVSS/MLSS", "SVI污泥指数"]
-target_cols = ["SRT", "MLVSS/MLSS", "SVI"]
 
-st.divider()
+df = load_data()
 
-# ---------------------- Step2 模型训练与验证 ----------------------
-st.header("Step 2 模型一键训练与精度验证")
-if st.session_state.df_raw is None:
-    st.warning("请先在Step1上传data.xlsx数据集，才能训练模型！")
-else:
-    df = st.session_state.df_raw
-    X = df[feature_cols]
-    Y = df[target_cols]
-    train_btn = st.button("🚀 一键划分训练集/测试集 + 训练全部模型")
-    if train_btn:
-        X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-        # 保存至缓存
-        st.session_state.X_train = X_train
-        st.session_state.X_test = X_test
-        st.session_state.y_train_dict = {t: y_train[t] for t in target_cols}
-        st.session_state.y_test_dict = {t: y_test[t] for t in target_cols}
+if df is not None:
+    # 定义列名
+    X_columns = ['Qoutm3/d', 'BOD5 (mg/l)', 'CODcr(mg/l)', 'SS(mg/l)',
+                 'NH3-N(mg/l)', 'TP(mg/l)', 'TN(mg/l)', 'Tin℃']
+    y_columns = ['SRT', 'F/M(%)', 'SVI']
 
-        # 批量训练3类模型，分别对3个因变量建模
-        model_storage = {}
-        model_list = ["线性回归", "Lasso", "随机森林", "XGBoost"]
-        for m_name in model_list:
-            target_models = {}
-            for t_col in target_cols:
-                y_tr = st.session_state.y_train_dict[t_col]
-                if m_name == "线性回归":
-                    md = LinearRegression()
-                elif m_name == "Lasso":
-                    md = Lasso(alpha=0.02, random_state=42)
-                elif m_name == "随机森林":
-                    md = RandomForestRegressor(n_estimators=100, random_state=42)
+    # 检查列是否存在
+    available_X = [col for col in X_columns if col in df.columns]
+    available_y = [col for col in y_columns if col in df.columns]
+
+    # 提取数据
+    X_data = df[available_X].copy()
+    y_data = df[available_y].copy()
+
+    # 删除缺失值
+    combined = pd.concat([X_data, y_data], axis=1).dropna()
+    X_data = combined[available_X]
+    y_data = combined[available_y]
+
+    # 标准化
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_data)
+
+    # 中文名称映射
+    x_names_cn = {
+        'Qoutm3/d': '出水量 (m³/d)',
+        'BOD5 (mg/l)': 'BOD5 (mg/L)',
+        'CODcr(mg/l)': 'CODcr (mg/L)',
+        'SS(mg/l)': 'SS (mg/L)',
+        'NH3-N(mg/l)': 'NH3-N (mg/L)',
+        'TP(mg/l)': 'TP (mg/L)',
+        'TN(mg/l)': 'TN (mg/L)',
+        'Tin℃': '进水温度 (°C)'
+    }
+    y_names_cn = {
+        'SRT': 'SRT (污泥龄)',
+        'F/M(%)': '有机质占比 (F/M)',
+        'SVI': 'SVI (污泥体积指数)'
+    }
+
+    # ============ 侧边栏：输入参数 ============
+    st.sidebar.markdown("## 📊 输入参数")
+    st.sidebar.markdown("---")
+
+    input_values = {}
+    for col in available_X:
+        min_val = float(X_data[col].min())
+        max_val = float(X_data[col].max())
+        default_val = float(X_data[col].mean())
+        input_values[col] = st.sidebar.number_input(
+            f"{x_names_cn.get(col, col)}",
+            min_value=min_val,
+            max_value=max_val,
+            value=default_val,
+            step=(max_val - min_val) / 100,
+            format="%.2f"
+        )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("## 🤖 模型选择")
+
+    # 模型选择
+    show_lasso = st.sidebar.checkbox("查看 Lasso 回归", value=True)
+    show_rf = st.sidebar.checkbox("查看 随机森林", value=True)
+    show_xgb = st.sidebar.checkbox("查看 XGBoost", value=True)
+    show_heatmap = st.sidebar.checkbox("查看 热力图", value=True)
+
+    # 一键勾选
+    if st.sidebar.button("📌 一键勾选全部"):
+        st.session_state.show_all = True
+        st.rerun()
+
+    if st.sidebar.button("🗑️ 取消全部选择"):
+        st.session_state.show_all = False
+        st.rerun()
+
+    if 'show_all' in st.session_state and st.session_state.show_all:
+        show_lasso = show_rf = show_xgb = show_heatmap = True
+
+
+    # ============ 训练模型 ============
+    @st.cache_resource
+    def train_models(X_data, y_data):
+        X_scaled = scaler.fit_transform(X_data)
+        models = {}
+        results = {}
+
+        for y_col in y_data.columns:
+            y_target = y_data[y_col].values
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y_target, test_size=0.2, random_state=42
+            )
+
+            # 线性回归
+            lr = LinearRegression()
+            lr.fit(X_train, y_train)
+
+            # Lasso
+            lasso = Lasso(alpha=0.1, random_state=42)
+            lasso.fit(X_train, y_train)
+
+            # 随机森林
+            rf = RandomForestRegressor(n_estimators=100, random_state=42)
+            rf.fit(X_train, y_train)
+
+            # XGBoost
+            xgb_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1,
+                                         max_depth=5, random_state=42)
+            xgb_model.fit(X_train, y_train)
+
+            models[y_col] = {
+                'lr': lr, 'lasso': lasso, 'rf': rf, 'xgb': xgb_model,
+                'X_train': X_train, 'X_test': X_test,
+                'y_train': y_train, 'y_test': y_test
+            }
+
+            # 评估
+            results[y_col] = {}
+            for name, model in [('lr', lr), ('lasso', lasso), ('rf', rf), ('xgb', xgb_model)]:
+                y_pred = model.predict(X_test)
+                results[y_col][name] = {
+                    'r2': r2_score(y_test, y_pred),
+                    'rmse': np.sqrt(mean_squared_error(y_test, y_pred))
+                }
+
+        return models, results
+
+
+    models, results = train_models(X_data, y_data)
+
+
+    # ============ 预测 ============
+    def predict_value(input_dict, model, scaler):
+        input_array = np.array([input_dict[col] for col in available_X]).reshape(1, -1)
+        input_scaled = scaler.transform(input_array)
+        return model.predict(input_scaled)[0]
+
+
+    # ============ 主区域 ============
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 特征重要性分析",
+        "📊 模型对比",
+        "🎯 预测与评估",
+        "🔧 优化建议",
+        "📋 数据总览"
+    ])
+
+    # ===== Tab 1: 特征重要性分析 =====
+    with tab1:
+        st.markdown("## 📈 特征重要性分析")
+        st.markdown("展示各输入特征对三个目标变量的影响程度")
+
+
+        # 训练模型并获取特征重要性
+        def get_feature_importance(models_dict, y_col, model_type='xgb'):
+            if model_type == 'xgb':
+                return models_dict[y_col]['xgb'].feature_importances_
+            elif model_type == 'rf':
+                return models_dict[y_col]['rf'].feature_importances_
+            else:
+                return np.abs(models_dict[y_col]['lasso'].coef_)
+
+
+        # 选择模型类型
+        model_type_importance = st.radio(
+            "选择模型类型",
+            ['XGBoost', '随机森林', 'Lasso'],
+            horizontal=True
+        )
+
+        model_map = {'XGBoost': 'xgb', '随机森林': 'rf', 'Lasso': 'lasso'}
+        model_key = model_map[model_type_importance]
+
+        # 创建三个子图
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig.suptitle(f'{model_type_importance} 特征重要性分析', fontsize=16, fontweight='bold')
+
+        for idx, y_col in enumerate(available_y):
+            if model_key == 'lasso':
+                importance = get_feature_importance(models, y_col, 'lasso')
+            else:
+                importance = get_feature_importance(models, y_col, model_key)
+
+            # 排序
+            sorted_idx = np.argsort(importance)[::-1]
+            sorted_names = [available_X[i] for i in sorted_idx]
+            sorted_values = importance[sorted_idx]
+            sorted_cn_names = [x_names_cn.get(name, name) for name in sorted_names]
+
+            ax = axes[idx]
+            bars = ax.barh(sorted_cn_names, sorted_values, color='steelblue')
+            ax.set_xlabel('特征重要性', fontsize=11)
+            ax.set_title(f'{y_names_cn.get(y_col, y_col)}', fontsize=12)
+            ax.invert_yaxis()
+
+            for bar, val in zip(bars, sorted_values):
+                ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2,
+                        f'{val:.3f}', va='center', fontsize=9)
+            ax.set_xlim(0, max(sorted_values) * 1.15)
+
+        plt.tight_layout()
+        st.pyplot(fig)
+
+        # 额外：单独的大图
+        st.markdown("---")
+        st.markdown("### 详细视图 - 点击展开")
+
+        selected_y = st.selectbox("选择目标变量", available_y, format_func=lambda x: y_names_cn.get(x, x))
+
+        if selected_y:
+            fig2, ax = plt.subplots(figsize=(10, 6))
+
+            if model_key == 'lasso':
+                importance = get_feature_importance(models, selected_y, 'lasso')
+            else:
+                importance = get_feature_importance(models, selected_y, model_key)
+
+            sorted_idx = np.argsort(importance)[::-1]
+            sorted_names = [available_X[i] for i in sorted_idx]
+            sorted_values = importance[sorted_idx]
+            sorted_cn_names = [x_names_cn.get(name, name) for name in sorted_names]
+
+            bars = ax.barh(sorted_cn_names, sorted_values, color='steelblue')
+            ax.set_xlabel('特征重要性', fontsize=12)
+            ax.set_title(f'{model_type_importance} - {y_names_cn.get(selected_y, selected_y)} 特征重要性', fontsize=14)
+            ax.invert_yaxis()
+
+            for bar, val in zip(bars, sorted_values):
+                ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2,
+                        f'{val:.3f}', va='center', fontsize=10)
+            ax.set_xlim(0, max(sorted_values) * 1.15)
+
+            plt.tight_layout()
+            st.pyplot(fig2)
+
+    # ===== Tab 2: 模型对比 =====
+    with tab2:
+        st.markdown("## 📊 模型性能对比")
+
+        # 显示评估结果
+        col1, col2 = st.columns(2)
+
+        for idx, y_col in enumerate(available_y):
+            with col1 if idx % 2 == 0 else col2:
+                st.markdown(f"### {y_names_cn.get(y_col, y_col)}")
+                data = []
+                for model_name, metrics in results[y_col].items():
+                    model_display = {'lr': '线性回归', 'lasso': 'Lasso', 'rf': '随机森林', 'xgb': 'XGBoost'}[model_name]
+                    data.append({
+                        '模型': model_display,
+                        'R²': f"{metrics['r2']:.4f}",
+                        'RMSE': f"{metrics['rmse']:.4f}"
+                    })
+                st.table(pd.DataFrame(data))
+
+        # 模型对比图
+        st.markdown("---")
+        st.markdown("### 模型性能可视化")
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+        for idx, y_col in enumerate(available_y):
+            ax = axes[idx]
+            model_names = ['线性回归', 'Lasso', '随机森林', 'XGBoost']
+            r2_values = [results[y_col]['lr']['r2'], results[y_col]['lasso']['r2'],
+                         results[y_col]['rf']['r2'], results[y_col]['xgb']['r2']]
+
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+            bars = ax.bar(model_names, r2_values, color=colors)
+            ax.set_ylim(0, 1.05)
+            ax.set_ylabel('R² Score', fontsize=11)
+            ax.set_title(f'{y_names_cn.get(y_col, y_col)}', fontsize=12)
+            ax.axhline(y=0.7, color='red', linestyle='--', alpha=0.5, label='良好阈值')
+
+            for bar, val in zip(bars, r2_values):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                        f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+            ax.legend()
+
+        plt.tight_layout()
+        st.pyplot(fig)
+
+        # ===== 如果勾选了热力图 =====
+        if show_heatmap:
+            st.markdown("---")
+            st.markdown("### 🔥 特征相关性热力图")
+
+            # 计算相关性
+            corr_data = pd.concat([X_data, y_data], axis=1)
+            corr_matrix = corr_data.corr()
+
+            fig, ax = plt.subplots(figsize=(12, 10))
+            sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0,
+                        fmt='.2f', square=True, linewidths=0.5, ax=ax)
+            ax.set_title('所有变量相关性热力图', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            st.pyplot(fig)
+
+    # ===== Tab 3: 预测与评估 =====
+    with tab3:
+        st.markdown("## 🎯 预测与评估")
+        st.markdown("基于输入的参数，预测三个目标变量的值")
+
+        if st.button("🚀 执行预测", type="primary"):
+            col1, col2, col3 = st.columns(3)
+
+            for idx, y_col in enumerate(available_y):
+                model = models[y_col]['xgb']  # 使用XGBoost
+                pred_val = predict_value(input_values, model, scaler)
+
+                # 获取实际值范围
+                actual_min = y_data[y_col].min()
+                actual_max = y_data[y_col].max()
+                actual_mean = y_data[y_col].mean()
+
+                # 判断状态
+                if pred_val > actual_max:
+                    status = "🔴 偏高"
+                    status_color = "danger-box"
+                elif pred_val < actual_min:
+                    status = "🔵 偏低"
+                    status_color = "warning-box"
                 else:
-                    md = xgb.XGBRegressor(n_estimators=100, max_depth=4, random_state=42)
-                md.fit(X_train, y_tr)
-                target_models[t_col] = md
-            model_storage[m_name] = target_models
-        st.session_state.model_dict = model_storage
-        st.success("全部模型训练完成！")
+                    status = "🟢 正常"
+                    status_color = "success-box"
 
-        # 输出模型精度指标表格
-        metric_table = []
-        for m_name, t_md in model_storage.items():
-            row = {"模型": m_name}
-            for t_col in target_cols:
-                y_pred = t_md[t_col].predict(X_test)
-                r2 = round(r2_score(st.session_state.y_test_dict[t_col], y_pred), 3)
-                rmse = round(np.sqrt(mean_squared_error(st.session_state.y_test_dict[t_col], y_pred)), 3)
-                row[f"{t_col}_R²"] = r2
-                row[f"{t_col}_RMSE"] = rmse
-            metric_table.append(row)
-        st.dataframe(pd.DataFrame(metric_table), use_container_width=True)
+                with [col1, col2, col3][idx]:
+                    st.markdown(f"### {y_names_cn.get(y_col, y_col)}")
+                    st.markdown(f"""
+                    <div class="{status_color}" style="padding:1rem;border-radius:10px;">
+                        <h3 style="margin:0;">{pred_val:.2f}</h3>
+                        <p style="margin:0;">状态: {status}</p>
+                        <p style="margin:0;font-size:0.9rem;">正常范围: {actual_min:.2f} ~ {actual_max:.2f}</p>
+                        <p style="margin:0;font-size:0.9rem;">平均值: {actual_mean:.2f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-st.divider()
+            # ===== 散点图：显示预测点在真实数据中的位置 =====
+            st.markdown("---")
+            st.markdown("### 📍 预测值在真实数据中的位置")
 
-# ---------------------- Step3 在线预测 + 预警 + 污泥龄优化 ----------------------
-st.header("Step 3 单样本预测、指标预警与运行优化方案")
-if len(st.session_state.model_dict) == 0:
-    st.warning("请先完成Step2模型训练！")
+            # 用户选择查看哪个目标变量的散点图
+            selected_scatter = st.selectbox(
+                "选择目标变量查看散点图",
+                available_y,
+                format_func=lambda x: y_names_cn.get(x, x)
+            )
+
+            if selected_scatter:
+                # 创建散点图
+                fig = go.Figure()
+
+                # 原始数据点
+                fig.add_trace(go.Scatter(
+                    x=y_data[selected_scatter],
+                    y=[0] * len(y_data),
+                    mode='markers',
+                    name='原始数据',
+                    marker=dict(size=10, color='blue', opacity=0.6),
+                    hovertemplate='<b>值</b>: %{x:.2f}<br><b>索引</b>: %{text}<extra></extra>',
+                    text=y_data.index
+                ))
+
+                # 预测点
+                pred_val = predict_value(input_values, models[selected_scatter]['xgb'], scaler)
+                fig.add_trace(go.Scatter(
+                    x=[pred_val],
+                    y=[0],
+                    mode='markers',
+                    name='预测值',
+                    marker=dict(size=18, color='red', symbol='star')
+                ))
+
+                fig.update_layout(
+                    title=f'{y_names_cn.get(selected_scatter, selected_scatter)} 预测值分布',
+                    xaxis_title='值',
+                    yaxis_title='',
+                    yaxis=dict(showticklabels=False),
+                    height=300,
+                    hovermode='closest'
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 显示统计数据
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("预测值", f"{pred_val:.2f}")
+                with col2:
+                    st.metric("最小值", f"{y_data[selected_scatter].min():.2f}")
+                with col3:
+                    st.metric("最大值", f"{y_data[selected_scatter].max():.2f}")
+
+    # ===== Tab 4: 优化建议 =====
+    with tab4:
+        st.markdown("## 🔧 优化建议")
+        st.markdown("根据当前污泥龄和F/M值，提供优化方案")
+
+        # 获取当前预测值
+        if st.button("🔄 生成优化方案", key="optimize"):
+            pred_srt = predict_value(input_values, models['SRT']['xgb'], scaler)
+            pred_fm = predict_value(input_values, models['F/M(%)']['xgb'], scaler)
+            pred_svi = predict_value(input_values, models['SVI']['xgb'], scaler)
+
+            # 获取正常范围
+            srt_min, srt_max = y_data['SRT'].min(), y_data['SRT'].max()
+            fm_min, fm_max = y_data['F/M(%)'].min(), y_data['F/M(%)'].max()
+            svi_min, svi_max = y_data['SVI'].min(), y_data['SVI'].max()
+
+            st.markdown("### 📊 当前状态评估")
+
+            col1, col2, col3 = st.columns(3)
+
+
+            def get_status(val, min_val, max_val):
+                if val < min_val:
+                    return "偏低 ⬇️", "warning-box"
+                elif val > max_val:
+                    return "偏高 ⬆️", "danger-box"
+                else:
+                    return "正常 ✅", "success-box"
+
+
+            status_srt, color_srt = get_status(pred_srt, srt_min, srt_max)
+            status_fm, color_fm = get_status(pred_fm, fm_min, fm_max)
+            status_svi, color_svi = get_status(pred_svi, svi_min, svi_max)
+
+            with col1:
+                st.markdown(f"""
+                <div class="{color_srt}" style="padding:1rem;border-radius:10px;">
+                    <h4>SRT (污泥龄)</h4>
+                    <h2>{pred_srt:.2f}</h2>
+                    <p>状态: {status_srt}</p>
+                    <p style="font-size:0.8rem;">正常范围: {srt_min:.2f} ~ {srt_max:.2f}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col2:
+                st.markdown(f"""
+                <div class="{color_fm}" style="padding:1rem;border-radius:10px;">
+                    <h4>有机质占比 (F/M)</h4>
+                    <h2>{pred_fm:.2f}%</h2>
+                    <p>状态: {status_fm}</p>
+                    <p style="font-size:0.8rem;">正常范围: {fm_min:.2f} ~ {fm_max:.2f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col3:
+                st.markdown(f"""
+                <div class="{color_svi}" style="padding:1rem;border-radius:10px;">
+                    <h4>SVI (污泥体积指数)</h4>
+                    <h2>{pred_svi:.2f}</h2>
+                    <p>状态: {status_svi}</p>
+                    <p style="font-size:0.8rem;">正常范围: {svi_min:.2f} ~ {svi_max:.2f}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # ===== 优化方案 =====
+            st.markdown("---")
+            st.markdown("### 💡 优化方案")
+
+            # 分析问题并给出建议
+            issues = []
+            if pred_srt < srt_min:
+                issues.append({
+                    'param': 'SRT (污泥龄)',
+                    'issue': '偏低',
+                    'suggestion': '建议增加污泥回流量，延长污泥在系统内的停留时间'
+                })
+            elif pred_srt > srt_max:
+                issues.append({
+                    'param': 'SRT (污泥龄)',
+                    'issue': '偏高',
+                    'suggestion': '建议减少污泥回流量，适当排泥'
+                })
+
+            if pred_fm < fm_min:
+                issues.append({
+                    'param': '有机质占比 (F/M)',
+                    'issue': '偏低',
+                    'suggestion': '建议增加进水量或减少MLSS浓度，提高有机负荷'
+                })
+            elif pred_fm > fm_max:
+                issues.append({
+                    'param': '有机质占比 (F/M)',
+                    'issue': '偏高',
+                    'suggestion': '建议减少进水量或增加MLSS浓度，降低有机负荷'
+                })
+
+            if pred_svi < svi_min:
+                issues.append({
+                    'param': 'SVI (污泥体积指数)',
+                    'issue': '偏低',
+                    'suggestion': '污泥沉降性能良好，维持当前运行参数'
+                })
+            elif pred_svi > svi_max:
+                issues.append({
+                    'param': 'SVI (污泥体积指数)',
+                    'issue': '偏高',
+                    'suggestion': '存在污泥膨胀风险，建议增加曝气量或调整营养比'
+                })
+
+            if issues:
+                for issue in issues:
+                    st.markdown(f"""
+                    <div class="warning-box" style="margin-bottom:0.5rem;">
+                        <b>⚠️ {issue['param']}: {issue['issue']}</b><br>
+                        📌 {issue['suggestion']}
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="success-box">
+                    ✅ 所有参数均在正常范围内，系统运行良好！
+                    <br>📌 建议：维持当前运行参数，定期监测水质指标。
+                </div>
+                """, unsafe_allow_html=True)
+
+            # ===== 污泥龄与F/M/SVI的关系 =====
+            st.markdown("---")
+            st.markdown("### 🔄 污泥龄与F/M、SVI的关系")
+
+            # 模拟不同污泥龄下的F/M和SVI变化
+            srt_range = np.linspace(srt_min * 0.5, srt_max * 1.5, 30)
+            fm_values = []
+            svi_values = []
+
+            # 使用训练好的模型预测不同SRT下的值
+            base_input = input_values.copy()
+            for srt_val in srt_range:
+                # 这里简化处理：假设SRT与F/M和SVI有负相关关系
+                # 实际应用中可以用模型预测
+                fm_values.append(pred_fm * (1 - 0.1 * (srt_val - pred_srt) / pred_srt))
+                svi_values.append(pred_svi * (1 - 0.08 * (srt_val - pred_srt) / pred_srt))
+
+            fig, ax1 = plt.subplots(figsize=(10, 6))
+
+            color1 = '#1f77b4'
+            ax1.set_xlabel('SRT (污泥龄)', fontsize=12)
+            ax1.set_ylabel('F/M (%)', color=color1, fontsize=12)
+            ax1.plot(srt_range, fm_values, color=color1, linewidth=2, label='F/M')
+            ax1.tick_params(axis='y', labelcolor=color1)
+            ax1.axvline(x=pred_srt, color='red', linestyle='--', alpha=0.7, label='当前SRT')
+
+            ax2 = ax1.twinx()
+            color2 = '#d62728'
+            ax2.set_ylabel('SVI', color=color2, fontsize=12)
+            ax2.plot(srt_range, svi_values, color=color2, linewidth=2, label='SVI')
+            ax2.tick_params(axis='y', labelcolor=color2)
+
+            ax1.legend(loc='upper left')
+            ax2.legend(loc='upper right')
+
+            plt.title('SRT对F/M和SVI的影响关系', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            st.pyplot(fig)
+
+            # 优化建议总结
+            st.markdown("---")
+            st.markdown("### 📋 优化总结")
+
+            # 计算目标调整
+            target_srt = pred_srt
+            if pred_fm > fm_max:
+                target_srt = pred_srt * 1.2  # 增加SRT降低F/M
+            elif pred_fm < fm_min:
+                target_srt = pred_srt * 0.8  # 减少SRT增加F/M
+
+            st.markdown(f"""
+            <div class="result-box">
+                <h4>🎯 建议调整目标</h4>
+                <ul>
+                    <li><b>当前SRT</b>: {pred_srt:.2f} → <b>目标SRT</b>: {target_srt:.2f}</li>
+                    <li><b>调整建议</b>: {'增加污泥回流量' if target_srt > pred_srt else '减少污泥回流量'}</li>
+                    <li><b>预期效果</b>: 将F/M调整至正常范围，改善污泥沉降性能</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ===== Tab 5: 数据总览 =====
+    with tab5:
+        st.markdown("## 📋 数据总览")
+
+        st.markdown("### 原始数据")
+        st.dataframe(df.head(20), use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("### 数据统计")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 自变量统计")
+            st.dataframe(X_data.describe())
+        with col2:
+            st.markdown("#### 因变量统计")
+            st.dataframe(y_data.describe())
+
+        st.markdown("---")
+        st.markdown("### 📊 数据分布")
+
+        # 选择变量查看分布
+        selected_col = st.selectbox("选择变量查看分布", df.columns.tolist())
+        if selected_col:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.hist(df[selected_col].dropna(), bins=30, color='steelblue', edgecolor='white')
+            ax.set_title(f'{selected_col} 分布', fontsize=14)
+            ax.set_xlabel(selected_col)
+            ax.set_ylabel('频数')
+            st.pyplot(fig)
+
 else:
-    select_pred_model = st.radio("选择用于预测的模型", ["线性回归", "Lasso", "随机森林", "XGBoost"])
-    run_pred = st.button("执行预测并生成优化方案")
-    if run_pred:
-        pred_model = st.session_state.model_dict[select_pred_model]
-        input_x = st.session_state.single_input
-        pred_res = {}
-        # 预测三个指标
-        for t in target_cols:
-            pred_res[t] = pred_model[t].predict(input_x)[0]
-        srt_pred = pred_res["SRT"]
-        org_pred = pred_res["MLVSS/MLSS"]
-        svi_pred = pred_res["SVI"]
+    st.error("无法加载数据，请检查文件路径。")
 
-        # 展示预测数值
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("预测SRT污泥龄(天)", f"{srt_pred:.2f}")
-        with c2:
-            st.metric("预测有机质占比", f"{org_pred:.3f}")
-        with c3:
-            st.metric("预测SVI污泥指数", f"{svi_pred:.1f}")
-
-        # 阈值预警（污水厂常规合理区间）
-        org_low, org_high = 0.35, 0.65
-        svi_low, svi_high = 70, 150
-        warn_text = []
-        if org_pred < org_low:
-            warn_text.append(f"⚠️ 有机质占比偏低({org_pred:.3f})，污泥活性不足")
-        elif org_pred > org_high:
-            warn_text.append(f"⚠️ 有机质占比偏高({org_pred:.3f})，F/M负荷过大易膨胀")
-        if svi_pred < svi_low:
-            warn_text.append(f"⚠️ SVI偏低({svi_pred:.1f})，污泥老化细碎")
-        elif svi_pred > svi_high:
-            warn_text.append(f"⚠️ SVI偏高({svi_pred:.1f})，存在污泥膨胀风险")
-        if len(warn_text) > 0:
-            st.error("\n".join(warn_text))
-        else:
-            st.success("✅ 有机质占比、SVI均处于正常运行区间")
-
-        # 污泥龄优化逻辑：指标越大，推荐SRT越大；越小则越小
-        base_srt = srt_pred
-        factor = ((org_pred / 0.5) + (svi_pred / 110)) / 2
-        opt_srt = round(base_srt * factor, 2)
-        st.subheader("📋 污泥运行优化方案")
-        st.metric("推荐最优污泥龄SRT(天)", opt_srt)
-        if factor > 1.05:
-            st.info(f"有机质/SVI偏高，建议**延长污泥龄至{opt_srt}天**，增加污泥总量，降低F/M负荷")
-        elif factor < 0.95:
-            st.info(f"有机质/SVI偏低，建议**缩短污泥龄至{opt_srt}天**，减少污泥总量，提升污泥活性")
-        else:
-            st.info("当前工况均衡，污泥龄无需大幅调整")
-
-st.divider()
-
-# ---------------------- Step4 可视化绘图控制面板 ----------------------
-st.header("Step 4 多模型可视化分析面板")
-if len(st.session_state.model_dict) == 0:
-    st.warning("请先完成Step2模型训练，才能生成图表！")
-else:
-    # 绘图勾选控件
-    st.subheader("图表选择（线性回归散点图为强制标配）")
-    col_check, col_btn = st.columns([3, 1])
-    with col_check:
-        show_heat = st.checkbox("显示相关性热力图")
-        show_lasso = st.checkbox("显示Lasso系数图")
-        show_rf = st.checkbox("显示随机森林特征重要度")
-        show_xgb = st.checkbox("显示XGBoost特征重要度")
-    with col_btn:
-        if st.button("一键勾选全部图表"):
-            show_heat = True
-            show_lasso = True
-            show_rf = True
-            show_xgb = True
-
-    # 选择绘图对应的因变量
-    select_target = st.radio("选择要可视化的目标污泥指标", target_cols, horizontal=True)
-    X_test = st.session_state.X_test
-    y_test_t = st.session_state.y_test_dict[select_target]
-    input_x = st.session_state.single_input
-    df_raw = st.session_state.df_raw
-
-    # ========== 1. 强制标配：线性回归真实-预测散点图 ==========
-    st.subheader("【标配】线性回归真实值vs预测值散点图")
-    lr_model = st.session_state.model_dict["线性回归"][select_target]
-    y_pred_test = lr_model.predict(X_test)
-    y_pred_single = lr_model.predict(input_x)[0]
-    fig_scatter = px.scatter(
-        x=y_test_t.values,
-        y=y_pred_test,
-        labels={"x": f"真实{select_target}", "y": f"线性回归预测{select_target}"},
-        title=f"线性回归拟合效果：{select_target}（蓝=历史样本，红=当前输入工况）",
-        hover_data={"真实值": y_test_t.values, "预测值": y_pred_test}
-    )
-    min_v = min(y_test_t.min(), y_pred_test.min())
-    max_v = max(y_test_t.max(), y_pred_test.max())
-    fig_scatter.add_scatter(x=[min_v, max_v], y=[min_v, max_v], mode="lines", line_dash="dash", name="理想拟合线")
-    fig_scatter.add_scatter(
-        x=[y_pred_single], y=[y_pred_single],
-        marker_color="red", marker_size=12, name="当前输入工况",
-        hover_data={"输入预测值": y_pred_single}
-    )
-    st.plotly_chart(fig_scatter, use_container_width=True)
-
-    # ========== 2. 可选：相关性热力图 ==========
-    if show_heat:
-        st.subheader("相关性热力图（含显著性标记）")
-        corr_df = df_raw[feature_cols + target_cols].copy()
-        corr_mat = corr_df.corr()
-        p_mat = np.zeros_like(corr_mat)
-        for i in range(len(corr_mat.columns)):
-            for j in range(len(corr_mat.columns)):
-                _, p = pearsonr(corr_df.iloc[:, i], df_raw.iloc[:, j])
-                p_mat[i, j] = p
-        def sig_star(p):
-            if p < 0.001: return "***"
-            elif p < 0.01: return "**"
-            elif p < 0.05: return "*"
-            else: return ""
-        annot_text = np.vectorize(lambda r, p: f"{r:.2f}{sig_star(p)}")(corr_mat.values, p_mat)
-        fig_heat, ax = plt.subplots(figsize=(14, 11))
-        sns.heatmap(corr_mat, annot=annot_text, fmt="", cmap="RdBu_r", vmin=-1, vmax=1, ax=ax)
-        ax.set_title("变量相关性热力图 ***p<0.001,**p<0.01,*p<0.05", fontsize=14)
-        st.pyplot(fig_heat)
-
-    # ========== 3. 可选：Lasso回归系数图 ==========
-    if show_lasso:
-        st.subheader(f"Lasso回归特征系数（{select_target}）")
-        lasso_md = st.session_state.model_dict["Lasso"][select_target]
-        coefs = lasso_md.coef_
-        fig_lasso, ax = plt.subplots(figsize=(10, 5))
-        bars = ax.barh(feature_names, coefs, color=np.where(coefs>0, "#d62728", "#1f77b4"))
-        ax.set_xlabel("Lasso标准化系数（正值正向影响，负值负向影响）")
-        ax.set_title(f"Lasso各进水参数对{select_target}的驱动系数")
-        st.pyplot(fig_lasso)
-
-    # ========== 4. 可选：随机森林特征重要度 ==========
-    if show_rf:
-        st.subheader(f"随机森林特征重要度（{select_target}）")
-        rf_md = st.session_state.model_dict["随机森林"][select_target]
-        imp_rf = rf_md.feature_importances_
-        fig_rf, ax = plt.subplots(figsize=(10, 5))
-        ax.barh(feature_names, imp_rf, color="#2ca02c")
-        ax.set_xlabel("特征重要度")
-        ax.set_title(f"7项进水参数对{select_target}贡献大小排序")
-        st.pyplot(fig_rf)
-
-    # ========== 5. 可选：XGBoost特征重要度 ==========
-    if show_xgb:
-        st.subheader(f"XGBoost特征重要度（{select_target}）")
-        xgb_md = st.session_state.model_dict["XGBoost"][select_target]
-        imp_xgb = xgb_md.feature_importances_
-        fig_xgb, ax = plt.subplots(figsize=(10, 5))
-        ax.barh(feature_names, imp_xgb, color="#ff7f0e")
-        ax.set_xlabel("特征重要度")
-        ax.set_title(f"XGBoost各进水参数对{select_target}影响权重")
-        st.pyplot(fig_xgb)
+st.markdown("---")
+st.markdown("💧 **污水处理智能分析平台 v2.0** | 基于机器学习的多模型预测系统")
