@@ -1,3 +1,7 @@
+# ===== 必须在所有import之前添加 =====
+import matplotlib
+matplotlib.use('Agg')  # 使用非交互式后端
+# ====================================
 import streamlit as st
 import pandas as pd
 import numpy as np
